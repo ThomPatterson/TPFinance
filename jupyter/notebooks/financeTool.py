@@ -2,16 +2,26 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import warnings
 
+#####
+# These are the four main DataFrames that are used as the state for everything
+#####
 expenses_by_year = pd.DataFrame()
 income_by_year = pd.DataFrame()
 nonretirement_investments_by_year = pd.DataFrame()
 retirement_investments_by_year = pd.DataFrame()
 
+#####
+# When running the simulation to process expenses it will be necessary to take a distribution from investments
+# This will require recalculating the balances of that investment for that year and all subsequent years
+# To do this we need to store the values that were used to create the investments initially so we can reference them when its recalculated
+#####
 nonretirement_account_settings = {}
 retirement_account_settings = {}
 
 networth_by_year = pd.DataFrame()
+message_log = []
 current_year = 0
 current_age = 0
 death_age = 0
@@ -22,6 +32,67 @@ num_samples = 10000
 #at what age are retirement investments available?
 retirement_age = 60
 
+def log(message, year=None, age=None):
+    if (year is None) or (age is None):
+        message_log.append(message)
+    else:
+        message_log.append("In " + str(int(year)) + " at age " + str(int(age)) + ": " + message)
+        
+def write_log():
+    with open("../data/log.txt", "w") as output:
+        #output.write(str(message_log))
+        #output.write("".format("\n".join(message_log[1:])))
+        multi_line_output = '\n'.join([i for i in message_log[1:]])
+        output.write(multi_line_output)
+
+def write_csv_files():
+    expenses_by_year.to_csv('../data/expenses.csv')
+    income_by_year.to_csv('../data/income.csv')
+    nonretirement_investments_by_year.to_csv('../data/nonretirement-investments.csv')
+    retirement_investments_by_year.to_csv('../data/retirement-investments.csv')
+    networth_by_year.to_csv('../data/networth.csv')
+        
+def usd_fmt(num):
+    return '${:0,.2f}'.format(num).replace('$-','-$')
+
+# helper function to allow you to check what an income is at some specified age
+def get_income_for_age(name, age):
+    df = income_by_year
+    return {
+        'low': int(df.loc[df['age']==age, name + " low"]),
+        'high': int(df.loc[df['age']==age, name + " high"])
+    }
+
+# helper function to allow you to check what an expense is at some specified age
+def get_expense_for_age(name, age):
+    df = expenses_by_year
+    return {
+        'low': int(df.loc[df['age']==age, name + " low"]),
+        'high': int(df.loc[df['age']==age, name + " high"])
+    }
+    
+# helper function to allow you to check what a nonretirement account balance is at some specified age
+# warning: this will give values before expenses have been processed.  This should not be relied on.
+def get_nonretirement_balance_for_age(name, age):
+    warnings.warn("It is not safe to trust investment account balances before expenses have been processed (usually by generate_totals())")
+    df = nonretirement_investments_by_year
+    return {
+        'low': int(df.loc[df['age']==age, name + " balance low"]),
+        'high': int(df.loc[df['age']==age, name + " balance high"])
+    }
+
+# helper function to allow you to check what a retirement account balance is at some specified age
+# warning: this will give values before expenses have been processed.  This should not be relied on.
+def get_retirement_balance_for_age(name, age):
+    warnings.warn("It is not safe to trust investment account balances before expenses have been processed (usually by generate_totals())")
+    df = retirement_investments_by_year
+    return {
+        'low': int(df.loc[df['age']==age, name + " balance low"]),
+        'high': int(df.loc[df['age']==age, name + " balance high"])
+    }
+
+# Start populating the four dataframes with age and year columns 
+# And a row from every year from current_year to death_age
 def setup(cy, ca, da):
     global current_year
     global current_age
@@ -43,7 +114,8 @@ def setup(cy, ca, da):
     
 
 
-
+# Given two values that together represent the bounds of a 90% confidence interval
+# Create and return a normal distribution with num_samples items that fit those bounds
 def generate_series(low, high):
     STD_DEV_90 = 3.29#converting from a 90% Confidence Interval to a Standard Deviation
     mean = (low + high) /2
@@ -52,6 +124,8 @@ def generate_series(low, high):
     return series    
 
 
+# Creates a series with num_samples items that represents 
+# ((amount + contribution) + ((amount + contribution) * growth_percent))
 def generate_series_for_year(amt_low, 
                             amt_high, 
                             growth_perc_low, 
@@ -76,6 +150,8 @@ def generate_series_for_year(amt_low,
     return total_series
 
 
+# Adds a new items to the specified DataFrame
+# Does input sanitization and adds the necessary columns to the DataFrame
 def add_item(df,
              isInvestment=False,
              name=None, 
@@ -90,8 +166,9 @@ def add_item(df,
              annual_contrib_start_age=0,
              annual_contrib_end_age=0
             ):
-    
-    #input sanitization
+    #####
+    # input sanitization
+    #####
     if name is None:
         raise Exception("name is required for all items")
         
@@ -132,19 +209,27 @@ def add_item(df,
         if annual_contrib_end_age > 0: 
             raise Exception(name, "annual_contrib_end_age only applies to investments.")
     
-    #add a column for the low and high values to the df
+    
+    #####
+    # add a column for the low and high values to the df
+    #####
     balance_low_name = name + " balance low" if isInvestment else name + " low"
     balance_high_name = name + " balance high" if isInvestment else name + " high"
     df.insert(len(df.columns), balance_low_name, 0.0)
     df.insert(len(df.columns), balance_high_name, 0.0)
     
-    #if this is an investment, add columns for distribution low and high amounts
+    #####
+    # if this is an investment, add columns for distribution low and high amounts
+    #####
     if isInvestment:
         distribution_low_name = name + " distribution low"
         distribution_high_name = name + " distribution high"
         df.insert(len(df.columns), distribution_low_name, 0.0)
         df.insert(len(df.columns), distribution_high_name, 0.0)
     
+    #####
+    # Now that we have the appropriate columns, set the balances for rows in that column
+    #####
     set_item_balances(df, 
                       start_age, 
                       end_age,
@@ -161,6 +246,10 @@ def add_item(df,
                      )
 
 
+# Sets the balance in rows for specified columns (amt_low_name & amt_high_name) between specified start and end age
+# Will blow away any previous values.  
+#    This is important because when expenses are processed investment distributions will call this function 
+#    to regen the balances after taking a distribution in a year
 def set_item_balances(df, 
                       start_age, 
                       end_age,
@@ -175,18 +264,35 @@ def set_item_balances(df,
                       annual_contrib_start_age, 
                       annual_contrib_end_age
                      ):
-    #get the rows for the affected years
+    #####
+    # Get the rows for the affected years, between start age (inclusive) and end age (exclusive)
+    #####
     years_affected = df.loc[(df['age'] >= start_age) & (df['age'] < end_age)]
     
+    
+    #####
+    #  Set values for first iteration of loop
+    #####
     amt_low = starting_amt_low
     amt_high = starting_amt_high
 
+    
+    #####
+    # Loop over all the affected years
+    #####
     for i, row in years_affected.iterrows():
+        
+        #####
+        # Determine if there is a contribution for this year, and in what amount
+        #####
         age = row['age']
         contrib_year = (age >= annual_contrib_start_age) and (age < annual_contrib_end_age)
         contrib_low = annual_contrib_amt_low if contrib_year else 0
         contrib_high = annual_contrib_amt_high if contrib_year else 0
         
+        #####
+        # Generate a series with num_samples items, accounting for amount, growth and contribution
+        #####
         year_expenses = generate_series_for_year(
             amt_low, 
             amt_high, 
@@ -196,22 +302,29 @@ def set_item_balances(df,
             contrib_high,
         )
 
-        #get 90% bounds and set amt_low and amt_high for next iteration
+        #####
+        #get 90% bounds and set amt_low and amt_high for next iteration of this loop
+        #####
         amt_low = year_expenses.quantile(0.05)
         amt_high = year_expenses.quantile(0.95)
         
-        #note, i is accurate since years_affected is just a view of df
+        #####
+        # Set the low and high balance for this row in the DataFrame
+        # note, i is accurate since years_affected is just a view of df
+        #####
         df.loc[i, amt_low_name] = amt_low
         df.loc[i, amt_high_name] = amt_high
 
-        
+
+# Add an expense to the expenses_by_year DataFrame
 def add_expense(**kwargs):
-    
     add_item(expenses_by_year, isInvestment=False, **kwargs)
     
+# Add an income to the income_by_year DataFrame
 def add_income(**kwargs):
     add_item(income_by_year, isInvestment=False, **kwargs)
     
+# Add a non-retirement investment to the nonretirement_investments_by_year DataFrame
 def add_nonretirement_investment(end_age=None,
                                  growth_perc_low=0, 
                                  growth_perc_high=0, 
@@ -239,6 +352,7 @@ def add_nonretirement_investment(end_age=None,
     #persist the settings for recalculating account balances after distributions
     nonretirement_account_settings[kwargs['name']] = kwargs
     
+# Add a retirement investment to the retirement_investments_by_year DataFrame
 def add_retirement_investment(end_age=None,
                               growth_perc_low=0, 
                               growth_perc_high=0, 
@@ -265,140 +379,258 @@ def add_retirement_investment(end_age=None,
     #persist the settings for recalculating account balances after distributions
     retirement_account_settings[kwargs['name']] = kwargs
     
+    
+# Returns the names of items that were added to income, expense, nonretirement or retirement dataframes
 def get_item_names(df):
-    #discover existing items from referenced dataframe
     item_names = []
     for name in df.columns.values:
         if ("low" in name) and ("distribution" not in name):
             item_names.append(name[0:len(name)-4]) #slice off " low"
     return item_names
 
+           
+# This is the most important function.  It runs a simulation for every year with num_samples iterations.
+# each simulation takes one possible income value, one possible expense value, and one possible value for each of the investment accounts
+# it then determines if a distribution is needed from the investment accounts to make up for insufficient income, and keeps track of what those adjustments are
+# After the simulations run for the year, it analyzes the output, and if necessary, updates investment account balances based on distributions that were needed
 def process_expenses():
-    
-    #nonretirement_item_names = get_item_names(nonretirement_investments_by_year)
-    #retirement_item_names = get_item_names(retirement_investments_by_year)
-    
-    #loop over each year
+    #####
+    # Loop over every year
+    #####
     for i, row in expenses_by_year.iterrows():
         
-        #get expense and income totals
+        age = row["age"]
+        year = row["year"]
+        
+        #####
+        # Keep track of simulation outcomes
+        #####
+        sufficient_income_counter = 0;
+        insufficent_income_counter = 0;
+
+        #####
+        # Create series with num_samples items for expenses and income for that year
+        #####
         total_expenses_low = row["total low"]
         total_expenses_high = row["total high"]
+        total_expenses_series = generate_series(total_expenses_low, total_expenses_high)
+        total_expenses_list = total_expenses_series.tolist()
+        
         total_income_low = income_by_year.loc[i, "total low"]
         total_income_high = income_by_year.loc[i, "total high"]
-        
-        #generate series
-        total_expenses_series = generate_series(total_expenses_low, total_expenses_high)
         total_income_series = generate_series(total_income_low, total_income_high)
+        total_income_list = total_income_series.tolist()
         
-        #create a new series of income - expense
-        income_shortfall_series = total_income_series.subtract(total_expenses_series)
-
-        if income_shortfall_series.min() < 0:
+        
+        #####
+        # Get list of investment accounts available this year
+        # if retirement_age isn't met yet, it will be an empty list
+        #####
+        nonretirement_investment_list = get_investment_list_for_expense_processing(nonretirement_investments_by_year, i)
+        retirement_investment_list = get_investment_list_for_expense_processing(retirement_investments_by_year, i) if age >= retirement_age else []
+        
+        
+        #####
+        # Run simulations
+        #####
+        for simulation_num in range(num_samples):
             
-            #replace any positive values with 0, there's no need for a "distribution" for those cases
-            # (only negative values represent a shortfall)
-            clipped_income_shortfall_series = income_shortfall_series.clip(upper=0)
+            simulation_income = total_income_list[simulation_num]
+            simulation_expense = total_expenses_list[simulation_num]
             
-            remaining_shortfall = clipped_income_shortfall_series
-            if len(nonretirement_account_settings) > 0:
-                remaining_shortfall = take_distribution_from_investment(nonretirement_investments_by_year, 
-                                                                        i,
-                                                                        nonretirement_account_settings, 
-                                                                        clipped_income_shortfall_series)
+            #####
+            # Determine shortage.  note: shortage will be a negative number.  Any positive number is not a shortage and will be set to 0
+            #####
+            simulation_income_shortage = simulation_income - simulation_expense
             
-            if remaining_shortfall is not None:
-                #there is still income shortfall after non-retirement accounts
-                if (row["age"] >= retirement_age) and (len(retirement_account_settings) > 0):
-                    remaining_shortfall = take_distribution_from_investment(retirement_investments_by_year, 
-                                                                            i,
-                                                                            retirement_account_settings, 
-                                                                            remaining_shortfall)
-                                              
+            if (simulation_income_shortage >= 0):
+                sufficient_income_counter += 1
+                simulation_income_shortage = 0
+            else:
+                insufficent_income_counter += 1
+                
             
+            #####
+            # Step through investment accounts to cover the shortage.
+            # Distributions are taken from investment accounts in the order they were added.
+            # Non-retirement investment accounts will be drained before retirement investment accounts
+            # Even if the shortage is zero we need to step through all the accounts to set ending balance and distribution
+            #####
             
-def take_distribution_from_investment(investment_df,
-                                      row_index,
-                                      investment_account_settings,
-                                      shortfall_series
-                                     ):
-                                              
-    investment_item_names = get_item_names(investment_df)
-                                              
-    clipped_income_shortfall_series = shortfall_series                                     
+            remaining_shortage = simulation_income_shortage
+            
+            for investment in nonretirement_investment_list:
+                results = determine_simulation_investment_balance(investment,
+                                                                  simulation_num,
+                                                                  remaining_shortage
+                                                                 )
+                    
+                investment["ending_balance_list"].append(results["new_balance"])
+                investment["distribution_list"].append(results["distribution"])
+                remaining_shortage = results["remaining_shortage"]
+                
+                
+            for investment in retirement_investment_list:
+                results = determine_simulation_investment_balance(investment,
+                                                                  simulation_num,
+                                                                  remaining_shortage
+                                                                 )
+                    
+                investment["ending_balance_list"].append(results["new_balance"])
+                investment["distribution_list"].append(results["distribution"])
+                remaining_shortage = results["remaining_shortage"]
+                
+                
+        #####
+        # Simulations complete for the year
+        #####
+        if (insufficent_income_counter > 0):
+            log(str(insufficent_income_counter) + " of " + str(num_samples) + " simulations found insufficient income for the year", year, age)
+        else:
+            log("All simulations (" + str(num_samples) + ") found sufficient income for the year", year, age)
+        
+        #####
+        # Update account balances if a distribution was taken
+        #####
+        update_account_balance_if_distribution_was_taken(nonretirement_investment_list,
+                                                        nonretirement_investments_by_year,
+                                                        nonretirement_account_settings,
+                                                        age,
+                                                        year,
+                                                        i)
+        
+        update_account_balance_if_distribution_was_taken(retirement_investment_list,
+                                                        retirement_investments_by_year,
+                                                        retirement_account_settings,
+                                                        age,
+                                                        year,
+                                                        i)
+        
+       
+def determine_simulation_investment_balance(investment,
+                                            simulation_num,
+                                            remaining_shortage
+                                           ):
     
-    still_short = True
-    account_index = 0;
-    while still_short:
+    simulation_balance = investment["starting_balance_list"][simulation_num]
 
-        #what is the name of this account?
-        account_name_unclean = investment_item_names[account_index]
-        account_name =  account_name_unclean[0:len(account_name_unclean)-8] #clip off " balance"
+    new_balance = simulation_balance + remaining_shortage #remaining shortage is negative, hence addition
+    distribution = remaining_shortage
 
+    #####
+    # If balance dropped below 0, that account is drained.  
+    # Set the balance to 0 and the distribution to what the balance had been
+    # If balance stayed above 0, then there is no remaining shortage
+    #####
+    if (new_balance < 0):
+        remaining_shortage = new_balance
+        new_balance = 0
+        distribution = simulation_balance * -1 #distribution must be negative
+    else:
+        remaining_shortage = 0
+
+    return {
+        "new_balance": new_balance,
+        "distribution": distribution,
+        "remaining_shortage": remaining_shortage
+    }
+
+    
+def update_account_balance_if_distribution_was_taken(investment_list,
+                                                     investment_df,
+                                                     account_settings,
+                                                     age,
+                                                     year,
+                                                     row_index
+                                                    ):
+    
+     for investment in investment_list:
+            starting_balance_series = pd.Series(investment["starting_balance_list"])
+            starting_balance_low = starting_balance_series.quantile(0.05)
+            starting_balance_high = starting_balance_series.quantile(0.95)
+            
+            #####
+            # Distribution is a negative number
+            # distribution_low is the greater negative number
+            # if a series generates a positive distribution, those numbers must be removed
+            #####
+            distribution_series = pd.Series(investment["distribution_list"])
+            distribution_low = distribution_series.quantile(0.05)
+            distribution_high = distribution_series.quantile(0.95) if distribution_series.quantile(0.95) <=0 else 0;
+            
+            new_balance_series = pd.Series(investment["ending_balance_list"])
+            new_balanace_low = new_balance_series.quantile(0.05) if new_balance_series.quantile(0.05) > 0 else 0
+            new_balanace_high = new_balance_series.quantile(0.95) if new_balance_series.quantile(0.95) > 0 else 0
+            
+            #update DataFrame with distribution amounts
+            investment_df.loc[row_index, investment["name"] + " distribution low"] = distribution_low
+            investment_df.loc[row_index, investment["name"] + " distribution high"] = distribution_high
+            
+            if (distribution_low < 0): #this means a distribution was taken (distribution is a negative number)
+                
+                log("A distribution of " + usd_fmt(distribution_low) + " to " + usd_fmt(distribution_high) + " was taken from " + investment["name"] + ".  The balance will be changing from " + usd_fmt(starting_balance_low) + " - " + usd_fmt(starting_balance_high) + " to " + usd_fmt(new_balanace_low) + " - " + usd_fmt(new_balanace_high), year, age)
+                
+                #regen the series, blowing away current values
+                set_item_balances(investment_df, 
+                    age, 
+                    account_settings[investment["name"]]['end_age'],
+                    account_settings[investment["name"]]['growth_perc_low'], 
+                    account_settings[investment["name"]]['growth_perc_high'], 
+                    new_balanace_low,
+                    investment["name"] + " balance low",
+                    new_balanace_high,
+                    investment["name"] + " balance high",
+                    account_settings[investment["name"]]['annual_contrib_amt_low'], 
+                    account_settings[investment["name"]]['annual_contrib_amt_high'], 
+                    account_settings[investment["name"]]['annual_contrib_start_age'], 
+                    account_settings[investment["name"]]['annual_contrib_end_age']
+                )
+            else:
+                log("There is no need to update the account balance for " + investment["name"] + ", there was either zero or insignificant distribution found to be needed in the simulations.", year, age)
+        
+#####
+# Create a list of investment accounts, where each item is a dict containing
+#     name
+#     list with num_samples items representing beginning balance
+#     list representing ending balance after processing expenses (will be populated in processing)
+#     list representing distribution that was taken out to cover expenses (will be populated in processing)
+#####        
+def get_investment_list_for_expense_processing(investment_df,
+                                               row_index
+                                              ):
+    retList = []
+    
+    #####
+    # Get names of the accounts
+    #####
+    investment_item_names = get_item_names(investment_df)
+    
+    for account_name_unclean in investment_item_names:
+        account_name = account_name_unclean[0:len(account_name_unclean)-8] #clip off " balance"
+        
         #get account balance values
         account_balance_low = investment_df.loc[row_index, account_name + " balance low"]
         account_balance_high = investment_df.loc[row_index, account_name + " balance high"]
+        
+        #no point in adding the account if its empty
+        if (account_balance_high > 0):
+            
+            #generate a series of balance values
+            account_balance_series = generate_series(account_balance_low, account_balance_high)
+            account_balance_list = account_balance_series.tolist()
 
-        #generate a series of balance values
-        account_balance_series = generate_series(account_balance_low, account_balance_high)
+            retList.append({
+                'name': account_name,
+                'starting_balance_list': account_balance_list,
+                'ending_balance_list': [],
+                'distribution_list': []
+            })
+        
+    return retList
+        
 
-        #generate a new series of balance - (clipped) shortfall.  Note "add" because shortfall vals are negative
-        remaining_account_balance_series = account_balance_series.add(clipped_income_shortfall_series)
-
-        #determine new low and high
-        remaining_low = (remaining_account_balance_series.quantile(0.05) 
-                         if remaining_account_balance_series.quantile(0.05) > 0 
-                         else 0)
-        remaining_high = (remaining_account_balance_series.quantile(0.95) 
-                         if remaining_account_balance_series.quantile(0.95) > 0 
-                         else 0)
-
-        #set new account balance values
-        investment_df.loc[row_index, account_name + " balance low"] = remaining_low
-        investment_df.loc[row_index, account_name + " balance high"] = remaining_high
-
-        #set the distribution amount.  Set negative values to 0, record the delta between initial balance and clipped remaining
-        positive_remaining_balance_series = remaining_account_balance_series.clip(lower=0)
-        distribution_balance_series = account_balance_series.subtract(positive_remaining_balance_series)
-        dist_low = distribution_balance_series.quantile(0.05)
-        dist_high = distribution_balance_series.quantile(0.95)
-        investment_df.loc[row_index, account_name + " distribution low"] = dist_low
-        investment_df.loc[row_index, account_name + " distribution high"] = dist_high
-
-        #recalculate all the future balances of this account
-        set_item_balances(investment_df, 
-              investment_df.loc[row_index, "age"] + 1, 
-              investment_account_settings[account_name]['end_age'],
-              investment_account_settings[account_name]['growth_perc_low'], 
-              investment_account_settings[account_name]['growth_perc_high'], 
-              remaining_low,
-              account_name + " balance low",
-              remaining_high,
-              account_name + " balance high",
-              investment_account_settings[account_name]['annual_contrib_amt_low'], 
-              investment_account_settings[account_name]['annual_contrib_amt_high'], 
-              investment_account_settings[account_name]['annual_contrib_start_age'], 
-              investment_account_settings[account_name]['annual_contrib_end_age']
-             )
-
-        if remaining_account_balance_series.min() < 0:#there are still cases where there is a shortfall
-            #replace any positive values with 0, there's no need for a "distribution" for those cases
-            clipped_income_shortfall_series = remaining_account_balance_series.clip(upper=0)
-
-            #increment the account index
-            account_index += 1
-
-            #check if this index is a valid account
-            if account_index >= len(investment_item_names):
-                still_short = False
-        else:
-            #there is no more shortfall
-            clipped_income_shortfall_series = None                                  
-            still_short = False
-                                              
-    return clipped_income_shortfall_series
-                                      
-
+# Create a "total low" and "total high" column in a dataframe
+# by finding all the items in that DataFrame, creating their series, then adding it all up
 def generate_total(df):
     
     item_names = get_item_names(df)
@@ -423,6 +655,22 @@ def generate_total(df):
         df.loc[i, "total low"] = amt_low
         df.loc[i, "total high"] = amt_high
 
+        
+# This function is called after all values have been entered in the notebook
+# It totals everything up as well as processes all expenses and adjusts investment account balances if necessary
+def generate_totals():
+    generate_total(income_by_year)
+    generate_total(expenses_by_year)
+    process_expenses()
+    generate_total(nonretirement_investments_by_year)
+    generate_total(retirement_investments_by_year)
+    generate_networth()
+    write_csv_files()
+    write_log()
+        
+
+# Generate a very simple "net worth" by adding income to investments and subtracting expenses
+# Note: retirement balances won't show up until retirement age
 def generate_networth():
     networth_by_year.insert(len(networth_by_year.columns), 'networth low', 0.0)
     networth_by_year.insert(len(networth_by_year.columns), 'networth high', 0.0)
@@ -455,15 +703,8 @@ def generate_networth():
             networth_by_year.loc[i, 'networth low'] = networth_with_retirement.quantile(0.05)
             networth_by_year.loc[i, 'networth high'] = networth_with_retirement.quantile(0.95)
         
-def generate_totals():
-    generate_total(income_by_year)
-    generate_total(expenses_by_year)
-    process_expenses()
-    generate_total(nonretirement_investments_by_year)
-    generate_total(retirement_investments_by_year)
-    generate_networth()
-    write_csv_files()
-        
+
+# Given a dataframe shape it into something that can be easily graphed
 def generate_amounts_for_graph(df):
     
     # create new dataframe that just holds the values we want to graph
@@ -637,11 +878,3 @@ def show_networth_graph(start_age=0,
     
     #show it in jupyter
     plt.show()
-    
-    
-def write_csv_files():
-    expenses_by_year.to_csv('../data/expenses.csv')
-    income_by_year.to_csv('../data/income.csv')
-    nonretirement_investments_by_year.to_csv('../data/nonretirement-investments.csv')
-    retirement_investments_by_year.to_csv('../data/retirement-investments.csv')
-    networth_by_year.to_csv('../data/networth.csv')
